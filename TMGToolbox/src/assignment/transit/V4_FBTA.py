@@ -104,6 +104,15 @@ EMME_VERSION = _util.getEmmeVersion(tuple)
 
 ##########################################################################################################
 
+@contextmanager
+def blankManager(obj):
+    try:
+        yield obj
+    finally:
+        pass
+
+####
+
 class V4_FareBaseTransitAssignment(_m.Tool()):
     
     version = '3.4.0'
@@ -580,9 +589,15 @@ class V4_FareBaseTransitAssignment(_m.Tool()):
             raise Exception("Scenario %s was not found!" %xtmf_ScenarioNumber)
         
         #---2 Set up demand matrix
-        self.DemandMatrix = _MODELLER.emmebank.matrix("mf%s" %xtmf_DemandMatrixNumber)
-        if self.DemandMatrix == None:
-            raise Exception("Full matrix mf%s was not found!" %xtmf_DemandMatrixNumber)
+        assignIdentityMatrix = False
+        if xtmf_DemandMatrixNumber == 0:
+            manager = _util.tempMatrixMANAGER(matrix_type= 'FULL')
+            assignIdentityMatrix = True
+        else:
+            demandMatrix = _MODELLER.emmebank.matrix("mf%s" %xtmf_DemandMatrixNumber)
+            if demandMatrix == None:
+                raise Exception("Matrix %s was not found!" %xtmf_DemandMatrixNumber)
+            manager = blankManager(demandMatrix)
         
         if self.Scenario.extra_attribute(self.WalkAttributeId) == None:
             raise Exception("Walk perception attribute %s does not exist" %self.WalkAttributeId)
@@ -637,7 +652,11 @@ class V4_FareBaseTransitAssignment(_m.Tool()):
         print "Running V4 Transit Assignment"
         
         try:
-            self._Execute()
+            with manager as self.DemandMatrix:
+                if assignIdentityMatrix == True:
+                    demandMatrix = _MODELLER.emmebank.matrix(self.DemandMatrix.id)
+                    demandMatrix.initialize(0.1)
+                self._Execute()
         except Exception, e:
             msg = str(e) + "\n" + _traceback.format_exc(e)
             raise Exception(msg)
@@ -646,7 +665,7 @@ class V4_FareBaseTransitAssignment(_m.Tool()):
     
     ##########################################################################################################    
     
-    
+
     def _Execute(self):
         with _m.logbook_trace(name="{classname} v{version}".format(classname=(self.__class__.__name__), version=self.version),
                                      attributes=self._GetAtts()):

@@ -1,5 +1,5 @@
 '''
-    Copyright 2014 Travel Modelling Group, Department of Civil Engineering, University of Toronto
+    Copyright 2015 Travel Modelling Group, Department of Civil Engineering, University of Toronto
 
     This file is part of the TMG Toolbox.
 
@@ -32,6 +32,7 @@ Create Time Period Networks
 #---VERSION HISTORY
 '''
     0.0.1 Created
+    0.1.1 Created on 2015-01-19 by mattaustin222
     
 '''
 
@@ -72,7 +73,7 @@ def averageAggregation(departures, start, end):
 
 class CreateTimePeriodNetworks(_m.Tool()):
     
-    version = '0.0.1'
+    version = '0.1.1'
     tool_run_msg = ""
     number_of_tasks = 1 # For progress reporting, enter the integer number of tasks here
     
@@ -89,11 +90,12 @@ class CreateTimePeriodNetworks(_m.Tool()):
     NewScenarioDescription = _m.Attribute(str)
     
     TransitServiceTableFile = _m.Attribute(str)
+    AggTypeSelectionFile = _m.Attribute(str)
     
     TimePeriodStart = _m.Attribute(int)
     TimePeriodEnd = _m.Attribute(int)
-    
-    CalcHeadwayOption = _m.Attribute(int)
+
+    DefaultAgg = _m.Attribute(str)
     
     def __init__(self):
         #---Init internal variables
@@ -101,13 +103,18 @@ class CreateTimePeriodNetworks(_m.Tool()):
         
         #---Set the defaults of parameters used by Modeller
         self.BaseScenario = _MODELLER.scenario #Default is primary scenario
+        self.DefaultAgg = 'n'
     
     def page(self):
         pb = _tmgTPB.TmgToolPageBuilder(self, title="Create Time Period Network v%s" %self.version,
                      description="Creates a network for use in a given time period, from a \
                          24-hour base network and corresponding transit service table. \
                          Line speeds and headways are calculated from the service table.\
-                         Transit lines with no service in the time period are removed.",
+                         Transit lines with no service in the time period are removed.\
+                         Headway calculations are performed based on a choice of\
+                         aggregation type. Agg type by line is loaded in from a file\
+                         which can be generated using the Create Aggregation\
+                         Selection File tool.",
                      branding_text="- TMG Toolbox")
         
         if self.tool_run_msg != "": # to display messages in the page
@@ -137,8 +144,22 @@ class CreateTimePeriodNetworks(_m.Tool()):
                                <li>trip_depart</li>\
                                <li>trip_arrive</li></ul>")
         
+        pb.add_select_file(tool_attribute_name='AggTypeSelectionFile',
+                           window_type='file', file_filter='*.csv',
+                           title="Aggregation Type Selection",
+                           note="Requires two columns:\
+                               <ul><li>emme_id</li>\
+                               <li>agg_type</li></ul>")
+
         pb.add_header("TOOL INPUTS")
         
+        keyval1 = {'n':'Naive', 'a':'Average'}
+        pb.add_radio_group(tool_attribute_name='DefaultAgg', 
+                           keyvalues= keyval1,
+                           title= "Default Aggregation Type",
+                           note="Used if line not in\
+                               agg selection file")
+
         with pb.add_table(False) as t:
             
             with t.table_cell():
@@ -152,14 +173,33 @@ class CreateTimePeriodNetworks(_m.Tool()):
                                 size=4,
                                 title="Time period end",
                                 note="In integer hours e.g. 2:30 PM = 1430")
-        
-        pb.add_select(tool_attribute_name='CalcHeadwayOption',
-                      keyvalues={1: "Naive: Time / Num. Departures",
-                                 2: "Average: Average headway in time period"},
-                      title="Method for calculating headway")
-        
+                
         return pb.render()
     
+    ##########################################################################################################
+    # allows for the tool to be called from another tool    
+    def __call__(self, baseScen, newScenNum, newScenDescrip, serviceFile, aggFile, defAgg, start, end):
+        self.tool_run_msg = ""
+        self.TRACKER.reset()
+
+        self.BaseScenario = baseScen
+        self.NewScenarioNumber = newScenNum
+        self.NewScenarioDescription = newScenDescrip
+        self.TransitServiceTableFile = serviceFile
+        self.AggTypeSelectionFile = aggFile
+        self.DefaultAgg = defAgg
+        self.TimePeriodStart = start
+        self.TimePeriodEnd = end
+        
+        try:            
+            self._Execute()
+        except Exception, e:
+            self.tool_run_msg = _m.PageBuilder.format_exception(
+                e, _traceback.format_exc(e))
+            raise
+        
+        self.tool_run_msg = _m.PageBuilder.format_info("Done.")
+
     ##########################################################################################################
         
     def run(self):
@@ -189,7 +229,7 @@ class CreateTimePeriodNetworks(_m.Tool()):
             start = self._ParseIntTime(self.TimePeriodStart)
             end = self._ParseIntTime(self.TimePeriodEnd)
             
-            badIdSet = self._LoadServiceTable(network, start, end)
+            badIdSet = self._LoadServiceTable(network, start, end).union(self._LoadAggTypeSelect(network))
             self.TRACKER.completeTask()
             print "Loaded service table"
             if len(badIdSet) > 0:
@@ -212,6 +252,7 @@ class CreateTimePeriodNetworks(_m.Tool()):
             
             print "Publishing network"
             network.delete_attribute('TRANSIT_LINE', 'trips')
+            network.delete_attribute('TRANSIT_LINE', 'aggtype')
             newScenario.publish_network(network)
             
 
@@ -247,8 +288,17 @@ class CreateTimePeriodNetworks(_m.Tool()):
             
             return hours * 3600.0 + minutes * 60.0 + float(seconds)
         except Exception, e:
-            raise IOError("Error parsing time %s: %s" %(i, e)) 
-    
+            raise IOError("Error parsing time %s: %s" %(s, e)) 
+
+    def _ParseAggType(self, a):
+        choiceSet = ('n', 'a')
+        try:
+            agg = a[0].lower()
+            if agg not in choiceSet: raise IOError()
+            else : return agg
+        except Exception, e:
+            raise IOError("You must select either naive or average as an aggregation type %s: %s" %(a, e))                    
+            
     def _LoadServiceTable(self, network, start, end):
         network.create_attribute('TRANSIT_LINE', 'trips', None)
         
@@ -287,21 +337,57 @@ class CreateTimePeriodNetworks(_m.Tool()):
                 else: transitLine.trips.append(trip)
         
         return badIds
+
+    def _LoadAggTypeSelect(self, network):
+        network.create_attribute('TRANSIT_LINE', 'aggtype', None)
         
-    def _ProcessTransitLines(self, network, start, end):
+        badIds = set()
         
-        if self.CalcHeadwayOption == 1:
-            aggregator = naiveAggregation
-        elif self.CalcHeadwayOption == 2:
-            aggregator = averageAggregation
-        else: raise Exception("Aggregator option unrecognized (%s)" %self.CalcHeadwayOption)
+        with open(self.AggTypeSelectionFile) as reader:
+            header = reader.readline()
+            cells = header.strip().split(self.COMMA)
+            
+            emmeIdCol = cells.index('emme_id')
+            aggCol = cells.index('agg_type')
+            
+            for num, line in enumerate(reader):
+                cells = line.strip().split(self.COMMA)
+                
+                id = cells[emmeIdCol]
+                transitLine = network.transit_line(id)
+                
+                if transitLine == None:
+                    badIds.add(id)
+                    continue #Skip and report
+                
+                try:
+                    aggregation = self._ParseAggType(cells[aggCol])
+                except Exception, e:
+                    print "Line " + num + " skipped: " + str(e)
+                    continue
+                                
+                if transitLine.aggtype == None: transitLine.aggtype = aggregation
         
+        return badIds
+        
+    def _ProcessTransitLines(self, network, start, end):              
         bounds = _util.FloatRange(0.01, 1000.0)
         
         toDelete = set()
         self.TRACKER.startProcess(network.element_totals['transit_lines'])
         for line in network.transit_lines():
-            
+            #Pick aggregation type for given line
+            if line.aggtype == 'n':
+                aggregator = naiveAggregation
+            elif line.aggtype == 'a':
+                aggregator = averageAggregation
+            elif self.DefaultAgg == 'n':
+                aggregator = naiveAggregation
+                _m.logbook_write("Default aggregation was used for line %s" %(line.id))
+            else:
+                aggregator = averageAggregation
+                _m.logbook_write("Default aggregation was used for line %s" %(line.id))
+
             if not line.trips: #Line trips list is empty or None
                 toDelete.add(line.id)
                 self.TRACKER.completeSubtask()
